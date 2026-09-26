@@ -1,0 +1,4 @@
+# No `resources.exec` at all: the plugin's implicit instance serves the group.
+paths: [examples/zero-config]
+resources:
+  api: {}    # bddkit 0.2.1 requires the key, even with no API

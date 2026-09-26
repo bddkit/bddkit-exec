@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test & clippy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One adapter per OS family (src/exec/unix.rs, src/exec/windows.rs);
+        # each is exercised on real processes by the unit and export tests.
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      # Pinned on purpose: a floating stable's new clippy lint must never
+      # redden a PR that has nothing to do with it.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.97.1"
+          components: clippy, rustfmt
+          rustflags: ""
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --locked --lib --test exports
+
+  e2e:
+    name: e2e against a published bddkit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "1.97.1"
+          rustflags: ""
+      # The host comes from crates.io at a pinned version, never a floating
+      # branch: a red run here must mean this plugin broke. 0.2.1 is the
+      # first release that reads `implicit_instance`.
+      - name: Install bddkit
+        run: cargo install bddkit --version 0.2.1 --locked
+      # The example and negative features are written for a POSIX shell;
+      # on Windows they run under Git Bash, which the runner image ships.
+      # examples/windows.yaml covers cmd.exe and PowerShell.
+      - name: Use Git Bash for the POSIX features
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "EXEC_SHELL=C:/Program Files/Git/bin/bash.exe" >> "$GITHUB_ENV"
+      - name: End-to-end
+        run: cargo test --locked --test e2e -- --nocapture
