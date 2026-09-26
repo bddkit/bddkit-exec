@@ -1,0 +1,10 @@
+# Windows only: the shells a suite reaches without Git Bash. Run from the
+# repository root, like examples/exec.yaml.
+paths: [examples/windows]
+resources:
+  api: {}              # bddkit 0.2.1 requires the key, even with no API
+  exec:
+    cmd: {}            # the default shell on Windows: cmd /S /C "<command>"
+    ps:
+      shell: powershell   # powershell -NoProfile -Command <command>
+default_exec: cmd

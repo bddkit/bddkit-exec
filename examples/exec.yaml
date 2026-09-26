@@ -1,0 +1,18 @@
+# The demo suite. Run from the repository root: `paths` resolves against the
+# working directory, not this file's location. The features are written for a
+# POSIX shell; on Windows point EXEC_SHELL at Git Bash, e.g.
+# EXEC_SHELL="C:/Program Files/Git/bin/bash.exe".
+paths: [examples/features]
+resources:
+  api: {}                    # bddkit 0.2.1 requires the key, even with no API
+  exec:
+    local:                   # cwd and timeout: the defaults
+      shell: ${EXEC_SHELL:-sh}
+      stop_grace_secs: 5     # default 2; how long `I stop` waits for a clean shutdown
+      env:
+        GREETING: hello
+    tools:
+      shell: ${EXEC_SHELL:-bash}
+      timeout_secs: 5
+      max_output_bytes: 65536
+default_exec: local

@@ -1,0 +1,3 @@
+plugin:
+  - name: exec
+    path: ../../target/release/libbddkit_exec.so
