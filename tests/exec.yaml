@@ -1,0 +1,12 @@
+# The negative suite: every file here is run by `tests/e2e.rs`, one at a
+# time, and its output checked. Not part of the demo.
+paths: [tests/features]
+resources:
+  api: {}
+  exec:
+    local:
+      shell: ${EXEC_SHELL:-sh}   # Git Bash on Windows; see examples/exec.yaml
+    tiny:
+      shell: ${EXEC_SHELL:-sh}
+      max_output_bytes: 16
+default_exec: local
