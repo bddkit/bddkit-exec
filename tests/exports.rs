@@ -298,3 +298,34 @@ fn a_mismatch_on_a_process_that_has_ended_is_fatal_not_not_yet() {
     }
     call(bddkit_drop_instance(handle));
 }
+
+#[test]
+fn a_drop_stops_a_running_command_at_once_and_the_step_says_why() {
+    let handle = init(json!({"timeout_secs": 60, "stop_grace_secs": 2}));
+    let running = std::thread::spawn(move || {
+        dispatch(
+            handle,
+            "^I run the command \"(?P<command>",
+            &[line::SLEEP],
+            None,
+        )
+    });
+    // Long enough for the command to be spawned and polled. A tree that
+    // ignores the request (ping under CTRL_BREAK) runs out the 2 s grace.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let started = std::time::Instant::now();
+    assert_eq!(call(bddkit_drop_instance(handle)), json!({"ok": true}));
+    let reply = running.join().expect("the dispatch returned");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the drop waited for the step: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reply["status"], "fatal", "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("run was interrupted")),
+        "{reply}"
+    );
+}

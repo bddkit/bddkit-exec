@@ -178,12 +178,67 @@ fn reader(
     (capture, handle)
 }
 
+/// The trees of one instance's live jobs, kept apart from the instance so an
+/// interrupt can reach them while a step holds the instance lock. A tree is
+/// listed from spawn until `Job::finish`, which removes it before reaping:
+/// on Unix a group may only be signalled while its leader is unreaped.
+pub struct Registry {
+    grace: Duration,
+    live: Mutex<Live>,
+}
+
+#[derive(Default)]
+struct Live {
+    trees: Vec<Arc<os::Tree>>,
+    /// When `interrupt` asked, which is when the grace period began.
+    interrupted: Option<Instant>,
+}
+
+impl Registry {
+    pub fn new(grace: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            grace,
+            live: Mutex::default(),
+        })
+    }
+
+    fn live(&self) -> std::sync::MutexGuard<'_, Live> {
+        self.live.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Asks every listed tree to stop (SIGTERM / CTRL_BREAK) and starts the
+    /// grace clock. Killing after the grace is up to whoever owns the jobs:
+    /// `run` for the one in flight, `Instance::reset` for the rest.
+    pub fn interrupt(&self) {
+        let mut live = self.live();
+        live.interrupted.get_or_insert_with(Instant::now);
+        if !self.grace.is_zero() {
+            for tree in &live.trees {
+                tree.interrupt();
+            }
+        }
+    }
+
+    pub fn interrupted(&self) -> bool {
+        self.live().interrupted.is_some()
+    }
+
+    /// What is left of `stop_grace_secs`, counted from the interrupt when
+    /// there was one: the request already went out, so none is spent twice.
+    pub fn grace_left(&self) -> Duration {
+        self.live()
+            .interrupted
+            .map_or(self.grace, |at| self.grace.saturating_sub(at.elapsed()))
+    }
+}
+
 /// A started command: a one-shot run once it has finished, or a background
 /// process for as long as the scenario keeps it.
 pub struct Job {
     pub spec: Spec,
     child: Child,
-    tree: os::Tree,
+    tree: Arc<os::Tree>,
+    registry: Arc<Registry>,
     pub stdout: Arc<Mutex<Capture>>,
     pub stderr: Arc<Mutex<Capture>>,
     readers: Vec<JoinHandle<()>>,
@@ -192,7 +247,7 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn spawn(spec: Spec, cap: usize) -> Result<Self, String> {
+    pub fn spawn(spec: Spec, cap: usize, registry: &Arc<Registry>) -> Result<Self, String> {
         let mut child = spec.command().spawn().map_err(|e| {
             format!(
                 "cannot start `{}` in {}: {e}",
@@ -201,7 +256,7 @@ impl Job {
             )
         })?;
         let tree = match os::Tree::adopt(&mut child) {
-            Ok(tree) => tree,
+            Ok(tree) => Arc::new(tree),
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -218,10 +273,19 @@ impl Job {
         }
         let (stdout, out_reader) = reader(child.stdout.take().expect("piped stdout"), cap);
         let (stderr, err_reader) = reader(child.stderr.take().expect("piped stderr"), cap);
+        {
+            let mut live = registry.live();
+            live.trees.push(Arc::clone(&tree));
+            // Started after the interrupt: nobody is left to wait on it.
+            if live.interrupted.is_some() {
+                tree.kill();
+            }
+        }
         Ok(Self {
             spec,
             child,
             tree,
+            registry: Arc::clone(registry),
             stdout,
             stderr,
             readers: vec![out_reader, err_reader],
@@ -246,6 +310,11 @@ impl Job {
             return;
         }
         self.tree.kill();
+        // Unlisted before the reap, under the lock `interrupt` signals with.
+        self.registry
+            .live()
+            .trees
+            .retain(|t| !Arc::ptr_eq(t, &self.tree));
         if let Ok(status) = self.child.wait() {
             self.exit.get_or_insert(os::exit_of(status));
         }
@@ -280,28 +349,47 @@ impl Drop for Job {
     }
 }
 
-/// How a one-shot run ended when it did not end on its own.
-pub struct TimedOut(pub Job);
+/// How a one-shot run ended.
+pub enum Ended {
+    Done(Job),
+    /// Out of time; its tree was killed.
+    TimedOut(Job),
+    /// The instance is being dropped; the tree got its grace period.
+    Interrupted(Job),
+}
 
 /// Runs to completion. Whatever the command left behind in its tree is
 /// killed once it exits: it would hold our pipes open, and nothing else
 /// would ever stop it.
-pub fn run(spec: Spec, cap: usize, timeout: Duration) -> Result<Result<Job, TimedOut>, String> {
+pub fn run(
+    spec: Spec,
+    cap: usize,
+    timeout: Duration,
+    registry: &Arc<Registry>,
+) -> Result<Ended, String> {
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| format!("a timeout of {timeout:?} is out of range"))?;
-    let mut job = Job::spawn(spec, cap)?;
+    let mut job = Job::spawn(spec, cap, registry)?;
     while job.poll().is_none() {
+        if registry.interrupted() {
+            stop_all([&mut job], registry.grace_left());
+            return Ok(Ended::Interrupted(job));
+        }
         if Instant::now() >= deadline {
             job.finish();
             job.drain(DRAIN);
-            return Ok(Err(TimedOut(job)));
+            return Ok(Ended::TimedOut(job));
         }
         thread::sleep(POLL);
     }
     job.finish();
     job.drain(DRAIN);
-    Ok(Ok(job))
+    // The interrupt's own request may be what ended it.
+    if registry.interrupted() {
+        return Ok(Ended::Interrupted(job));
+    }
+    Ok(Ended::Done(job))
 }
 
 /// A graceful request to every tree (SIGTERM on Unix, CTRL_BREAK on
@@ -356,14 +444,19 @@ pub fn probe(config: &InstanceConfig) -> Result<(), String> {
         stdin: None,
     };
     let described = spec.describe();
-    match run(spec, 64 * 1024, Duration::from_secs(10))? {
-        Ok(job) if job.exit() == Some(Exit::Code(0)) => Ok(()),
-        Ok(job) => Err(format!(
+    match run(
+        spec,
+        64 * 1024,
+        Duration::from_secs(10),
+        &Registry::new(Duration::ZERO),
+    )? {
+        Ended::Done(job) if job.exit() == Some(Exit::Code(0)) => Ok(()),
+        Ended::Done(job) => Err(format!(
             "`{described}` ended with {}: {}",
             job.exit().map_or("no exit".into(), |e| e.to_string()),
             text_of(&job.stderr).trim()
         )),
-        Err(_) => Err(format!("`{described}` did not finish within 10 seconds")),
+        _ => Err(format!("`{described}` did not finish within 10 seconds")),
     }
 }
 
@@ -426,10 +519,19 @@ mod tests {
         lf(text_of(c))
     }
 
+    fn registry() -> Arc<Registry> {
+        Registry::new(Duration::from_secs(2))
+    }
+
+    fn spawn(spec: Spec) -> Job {
+        Job::spawn(spec, 1024, &registry()).expect("spawn")
+    }
+
     fn completed(spec: Spec, cap: usize) -> Job {
-        run(spec, cap, Duration::from_secs(10))
-            .expect("spawn")
-            .unwrap_or_else(|_| panic!("timed out"))
+        match run(spec, cap, Duration::from_secs(10), &registry()).expect("spawn") {
+            Ended::Done(job) => job,
+            _ => panic!("did not finish"),
+        }
     }
 
     #[test]
@@ -455,9 +557,10 @@ mod tests {
             shell(script::HANG_WITH_CHILD),
             1024,
             Duration::from_millis(500),
+            &registry(),
         )
         .expect("spawn");
-        let Err(TimedOut(job)) = outcome else {
+        let Ended::TimedOut(job) = outcome else {
             panic!("it finished")
         };
         assert!(
@@ -487,7 +590,7 @@ mod tests {
 
     #[test]
     fn stop_all_ends_a_pipeline_within_the_grace_period() {
-        let mut job = Job::spawn(shell(script::PIPELINE), 1024).expect("spawn");
+        let mut job = spawn(shell(script::PIPELINE));
         let started = Instant::now();
         stop_all([&mut job], Duration::from_secs(2));
         assert!(started.elapsed() < Duration::from_secs(4));
@@ -500,7 +603,7 @@ mod tests {
 
     #[test]
     fn a_zero_grace_kills_without_asking() {
-        let mut job = Job::spawn(shell(script::SLEEP), 1024).expect("spawn");
+        let mut job = spawn(shell(script::SLEEP));
         let started = Instant::now();
         stop_all([&mut job], Duration::ZERO);
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -516,7 +619,7 @@ mod tests {
     #[test]
     fn a_process_that_ignores_sigterm_is_killed_when_its_grace_runs_out() {
         let spec = shell("trap '' TERM; echo ready; while :; do sleep 0.05; done");
-        let mut job = Job::spawn(spec, 1024).expect("spawn");
+        let mut job = spawn(spec);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !text(&job.stdout).contains("ready") && Instant::now() < deadline {
             thread::sleep(POLL);
@@ -531,7 +634,7 @@ mod tests {
 
     #[test]
     fn poll_sees_the_exit_before_the_process_is_reaped() {
-        let mut job = Job::spawn(shell(script::EXIT_7), 1024).expect("spawn");
+        let mut job = spawn(shell(script::EXIT_7));
         let deadline = Instant::now() + Duration::from_secs(5);
         while job.poll().is_none() && Instant::now() < deadline {
             thread::sleep(POLL);
@@ -546,7 +649,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn on_unix_a_polled_leader_stays_a_zombie_until_finish() {
-        let mut job = Job::spawn(shell(script::EXIT_7), 1024).expect("spawn");
+        let mut job = spawn(shell(script::EXIT_7));
         let pid = job.child.id();
         let deadline = Instant::now() + Duration::from_secs(5);
         while job.poll().is_none() && Instant::now() < deadline {
@@ -559,7 +662,7 @@ mod tests {
 
     #[test]
     fn dropping_a_job_kills_its_tree() {
-        let job = Job::spawn(shell(script::SLEEP), 1024).expect("spawn");
+        let job = spawn(shell(script::SLEEP));
         let pid = job.child.id();
         drop(job);
         assert!(!os::alive(pid));
@@ -571,7 +674,7 @@ mod tests {
             program: Program::Argv(vec!["no-such-binary-bddkit".into()]),
             ..shell("")
         };
-        let e = Job::spawn(spec, 1024).err().expect("refused");
+        let e = Job::spawn(spec, 1024, &registry()).err().expect("refused");
         assert!(e.contains("no-such-binary-bddkit"), "{e}");
     }
 

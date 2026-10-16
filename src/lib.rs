@@ -116,13 +116,19 @@ pub extern "C" fn bddkit_probe_config(request: *const c_char) -> *mut c_char {
     })
 }
 
-/// A handle is an index into this table, never a pointer. Instances sit
-/// behind `Arc` so a step never runs while this lock is held.
-static INSTANCES: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Instance>>>>> =
-    LazyLock::new(Mutex::default);
+/// An instance and the part of it a drop may touch while a step holds the
+/// instance lock.
+struct Entry {
+    registry: Arc<exec::Registry>,
+    instance: Mutex<Instance>,
+}
+
+/// A handle is an index into this table, never a pointer. Entries sit behind
+/// `Arc` so a step never runs while this lock is held.
+static INSTANCES: LazyLock<Mutex<HashMap<u64, Arc<Entry>>>> = LazyLock::new(Mutex::default);
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
-fn instance(handle: u64) -> Option<Arc<Mutex<Instance>>> {
+fn instance(handle: u64) -> Option<Arc<Entry>> {
     INSTANCES.lock().expect("instances").get(&handle).cloned()
 }
 
@@ -136,10 +142,15 @@ pub extern "C" fn bddkit_init_instance(request: *const c_char) -> *mut c_char {
             Err(error) => return reply::err(error),
         };
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst);
+        let instance = Instance::new(config);
+        let entry = Entry {
+            registry: Arc::clone(&instance.registry),
+            instance: Mutex::new(instance),
+        };
         INSTANCES
             .lock()
             .expect("instances")
-            .insert(handle, Arc::new(Mutex::new(Instance::new(config))));
+            .insert(handle, Arc::new(entry));
         serde_json::json!({"ok": true, "handle": handle}).to_string()
     })
 }
@@ -155,12 +166,12 @@ pub extern "C" fn bddkit_dispatch(
             Ok(v) => v,
             Err(e) => return reply::fatal(&e.to_string(), &[]),
         };
-        let Some(instance) = instance(handle) else {
+        let Some(entry) = instance(handle) else {
             return reply::fatal("unknown handle", &[]);
         };
         // A poisoned lock means an earlier step panicked mid-way; the state
         // is still coherent enough to report on and to kill.
-        let mut instance = instance.lock().unwrap_or_else(|e| e.into_inner());
+        let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
         steps::route(&mut instance, step_index, &steps::Request::parse(&value))
     })
 }
@@ -170,8 +181,9 @@ pub extern "C" fn bddkit_dispatch(
 #[unsafe(no_mangle)]
 pub extern "C" fn bddkit_reset_scenario(handle: u64) -> *mut c_char {
     guard("envelope", move || match instance(handle) {
-        Some(instance) => {
-            instance.lock().unwrap_or_else(|e| e.into_inner()).reset();
+        Some(entry) => {
+            let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
+            instance.reset();
             reply::ok()
         }
         None => reply::err("unknown handle"),
@@ -180,13 +192,17 @@ pub extern "C" fn bddkit_reset_scenario(handle: u64) -> *mut c_char {
 
 /// When the feature file ends, and swept at the end of the run for a file
 /// that panicked. The last chance to kill a process before the run exits.
+/// Every process is asked to stop before the instance lock is awaited, so a
+/// step still running holds the drop up for the grace period at most.
 #[unsafe(no_mangle)]
 pub extern "C" fn bddkit_drop_instance(handle: u64) -> *mut c_char {
     guard("envelope", move || {
         let removed = INSTANCES.lock().expect("instances").remove(&handle);
         match removed {
-            Some(instance) => {
-                instance.lock().unwrap_or_else(|e| e.into_inner()).reset();
+            Some(entry) => {
+                entry.registry.interrupt();
+                let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
+                instance.reset();
                 reply::ok()
             }
             None => reply::err("unknown handle"),
