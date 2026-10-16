@@ -156,3 +156,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+
+  abi-manifest:
+    name: bddkit-plugin.json
+    needs: release
+    if: ${{ always() && (inputs.rebuild_tag != '' || needs.release.outputs.created == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.rebuild_tag != '' && inputs.rebuild_tag || needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.TAG }}
+
+      # Once per release, not from the per-target jobs, so they cannot race.
+      - name: Upload bddkit-plugin.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" bddkit-plugin.json --clobber

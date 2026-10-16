@@ -197,6 +197,17 @@ pub extern "C" fn bddkit_drop_instance(handle: u64) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn bddkit_plugin_json_declares_the_abi_the_library_reports() {
+        let declared: serde_json::Value =
+            serde_json::from_str(include_str!("../bddkit-plugin.json")).expect("valid JSON");
+        assert_eq!(
+            declared["abi"],
+            crate::bddkit_abi_version(),
+            "bddkit-plugin.json must name the ABI bddkit_abi_version() returns"
+        );
+    }
+
+    #[test]
     fn the_manifest_claims_exec_per_worker_with_an_implicit_instance() {
         let v: serde_json::Value = serde_json::from_str(&crate::manifest_json()).expect("JSON");
         assert_eq!(v["name"], "exec");
