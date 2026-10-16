@@ -16,7 +16,7 @@ use regex::Regex;
 use serde_json::{Map, Value, json};
 
 use crate::config;
-use crate::exec::{self, Exit, Job, Program, TimedOut};
+use crate::exec::{self, Ended, Exit, Job, Program};
 use crate::instance::Instance;
 use crate::matchers::{self, Delimited};
 use crate::reply::{self, Diagnostic};
@@ -574,9 +574,18 @@ fn run(instance: &mut Instance, req: &Request, program: Program) -> String {
     );
     instance.last = None;
     let timeout = instance.timeout();
-    match exec::run(spec, instance.config.max_output_bytes, timeout) {
+    let cap = instance.config.max_output_bytes;
+    match exec::run(spec, cap, timeout, &instance.registry) {
         Err(e) => reply::fatal(&e, &[]),
-        Ok(Err(TimedOut(mut job))) => {
+        Ok(Ended::Interrupted(mut job)) => {
+            trace(req, format_args!("interrupted"));
+            let msg = format!(
+                "`{}` was stopped: the run was interrupted",
+                job.spec.describe()
+            );
+            fail(&mut job, req, &msg)
+        }
+        Ok(Ended::TimedOut(mut job)) => {
             trace(req, format_args!("timed out after {timeout:?}"));
             let msg = format!(
                 "`{}` did not finish within {} seconds; its process tree was killed",
@@ -585,7 +594,7 @@ fn run(instance: &mut Instance, req: &Request, program: Program) -> String {
             );
             fail(&mut job, req, &msg)
         }
-        Ok(Ok(job)) => {
+        Ok(Ended::Done(job)) => {
             trace(req, format_args!("{}", describe_exit(job.exit())));
             let code = match job.exit() {
                 Some(Exit::Code(c)) => c.to_string(),
@@ -626,7 +635,7 @@ fn start(instance: &mut Instance, req: &Request, name: &str, program: Program) -
             spec.cwd.display()
         ),
     );
-    match Job::spawn(spec, instance.config.max_output_bytes) {
+    match Job::spawn(spec, instance.config.max_output_bytes, &instance.registry) {
         Ok(job) => {
             instance.processes.push((name.to_string(), job));
             reply::passed()

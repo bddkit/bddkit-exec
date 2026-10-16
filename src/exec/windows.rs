@@ -86,8 +86,9 @@ pub struct Tree {
 }
 
 // SAFETY: a job handle is a kernel object handle, usable from any thread;
-// the plugin only ever touches it from one thread at a time anyway.
+// TerminateJobObject and GenerateConsoleCtrlEvent take no exclusive access.
 unsafe impl Send for Tree {}
+unsafe impl Sync for Tree {}
 
 impl Tree {
     /// Puts the suspended child in a fresh job, then lets it run.

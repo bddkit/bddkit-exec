@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::InstanceConfig;
-use crate::exec::{self, Job, Program, Spec};
+use std::sync::Arc;
+
+use crate::exec::{self, Job, Program, Registry, Spec};
 
 /// Per-scenario preparation, set with `the command … is` steps.
 #[derive(Default)]
@@ -19,6 +21,8 @@ pub struct Context {
 
 pub struct Instance {
     pub config: InstanceConfig,
+    /// Reachable without the instance lock; see `Registry`.
+    pub registry: Arc<Registry>,
     pub context: Context,
     pub last: Option<Job>,
     /// In start order, names unique within the scenario.
@@ -28,6 +32,7 @@ pub struct Instance {
 impl Instance {
     pub fn new(config: InstanceConfig) -> Self {
         Self {
+            registry: Registry::new(config.stop_grace),
             config,
             context: Context::default(),
             last: None,
@@ -37,7 +42,7 @@ impl Instance {
 
     /// Kills every process the scenario started and forgets the rest.
     pub fn reset(&mut self) {
-        let grace = self.config.stop_grace;
+        let grace = self.registry.grace_left();
         exec::stop_all(self.processes.iter_mut().map(|(_, job)| job), grace);
         self.processes.clear();
         self.last = None;
@@ -133,8 +138,10 @@ mod tests {
             &std::env::temp_dir(),
             false,
         );
-        i.processes
-            .push(("sleeper".into(), Job::spawn(spec, 1024).expect("spawn")));
+        i.processes.push((
+            "sleeper".into(),
+            Job::spawn(spec, 1024, &i.registry).expect("spawn"),
+        ));
         i.reset();
         assert!(i.processes.is_empty() && i.context.env.is_empty() && i.last.is_none());
     }
