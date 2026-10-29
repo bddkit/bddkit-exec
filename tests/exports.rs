@@ -99,7 +99,7 @@ fn init(config: Value) -> u64 {
 
 #[test]
 fn the_manifest_and_the_step_list_parse() {
-    assert_eq!(bddkit_abi_version(), 2);
+    assert_eq!(bddkit_abi_version(), 3);
     assert_eq!(call(bddkit_manifest())["name"], "exec");
     let steps = call(bddkit_list_steps());
     assert!(
