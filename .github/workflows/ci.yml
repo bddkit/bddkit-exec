@@ -49,9 +49,10 @@ jobs:
           rustflags: ""
       # The host comes from crates.io at a pinned version, never a floating
       # branch: a red run here must mean this plugin broke. 0.2.1 is the
-      # first release that reads `implicit_instance`.
+      # first release that reads `implicit_instance`, and 0.4.0 the first that
+      # speaks plugin ABI 3.
       - name: Install bddkit
-        run: cargo install bddkit --version 0.3.0 --locked
+        run: cargo install bddkit --version 0.4.0 --locked
       # The example and negative features are written for a POSIX shell;
       # on Windows they run under Git Bash, which the runner image ships.
       # examples/windows.yaml covers cmd.exe and PowerShell.
