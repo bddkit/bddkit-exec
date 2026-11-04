@@ -14,18 +14,16 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use instance::Instance;
 
 /// Outside `guard`, and safe there only because it provably cannot panic:
-/// `CString::new` returns a `Result` and the fallback literal has no interior
-/// NUL. Anything added here must keep that property.
+/// `CString::new` returns a `Result` and the fallback is a C string literal.
+/// Anything added here must keep that property.
 fn out(s: String) -> *mut c_char {
     CString::new(s)
-        .unwrap_or_else(|_| {
-            CString::new("{\"ok\":false,\"error\":\"NUL in reply\"}").expect("literal")
-        })
+        .unwrap_or_else(|_| c"{\"ok\":false,\"error\":\"NUL in reply\"}".to_owned())
         .into_raw()
 }
 
@@ -34,6 +32,10 @@ fn input(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
+    // SAFETY: `p` is not null. The contract makes a request a host-owned
+    // `*const c_char` valid for the duration of the call, which encloses this
+    // one, and it is copied before returning. The contract does not spell out
+    // NUL termination; the host builds the request from a `CString`.
     unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
@@ -86,6 +88,8 @@ pub extern "C" fn bddkit_list_steps() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn bddkit_free_string(s: *mut c_char) {
     if !s.is_null() {
+        // SAFETY: by this function's contract `s` came from `out`'s
+        // `CString::into_raw` in this library and has not been freed yet.
         drop(unsafe { CString::from_raw(s) });
     }
 }
@@ -128,8 +132,14 @@ struct Entry {
 static INSTANCES: LazyLock<Mutex<HashMap<u64, Arc<Entry>>>> = LazyLock::new(Mutex::default);
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
+/// Nothing can panic under this lock (a lookup, an insert, a remove), and the
+/// table holds no half-updated state if it ever did.
+fn instances() -> MutexGuard<'static, HashMap<u64, Arc<Entry>>> {
+    INSTANCES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 fn instance(handle: u64) -> Option<Arc<Entry>> {
-    INSTANCES.lock().expect("instances").get(&handle).cloned()
+    instances().get(&handle).cloned()
 }
 
 /// Lazy: the first exec step of a feature file. Spawns nothing — a process
@@ -147,10 +157,7 @@ pub extern "C" fn bddkit_init_instance(request: *const c_char) -> *mut c_char {
             registry: Arc::clone(&instance.registry),
             instance: Mutex::new(instance),
         };
-        INSTANCES
-            .lock()
-            .expect("instances")
-            .insert(handle, Arc::new(entry));
+        instances().insert(handle, Arc::new(entry));
         serde_json::json!({"ok": true, "handle": handle}).to_string()
     })
 }
@@ -171,7 +178,10 @@ pub extern "C" fn bddkit_dispatch(
         };
         // A poisoned lock means an earlier step panicked mid-way; the state
         // is still coherent enough to report on and to kill.
-        let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
+        let mut instance = entry
+            .instance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         steps::route(&mut instance, step_index, &steps::Request::parse(&value))
     })
 }
@@ -182,7 +192,10 @@ pub extern "C" fn bddkit_dispatch(
 pub extern "C" fn bddkit_reset_scenario(handle: u64) -> *mut c_char {
     guard("envelope", move || match instance(handle) {
         Some(entry) => {
-            let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
+            let mut instance = entry
+                .instance
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             instance.reset();
             reply::ok()
         }
@@ -197,11 +210,14 @@ pub extern "C" fn bddkit_reset_scenario(handle: u64) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub extern "C" fn bddkit_drop_instance(handle: u64) -> *mut c_char {
     guard("envelope", move || {
-        let removed = INSTANCES.lock().expect("instances").remove(&handle);
+        let removed = instances().remove(&handle);
         match removed {
             Some(entry) => {
                 entry.registry.interrupt();
-                let mut instance = entry.instance.lock().unwrap_or_else(|e| e.into_inner());
+                let mut instance = entry
+                    .instance
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 instance.reset();
                 reply::ok()
             }

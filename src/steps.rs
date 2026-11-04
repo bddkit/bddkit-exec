@@ -1,16 +1,10 @@
-//! The step vocabulary and its dispatch. `STEPS` and the `match` in `route`
-//! are the plugin's contract with itself: an index into this table is what
-//! the host passes back, so a step is added at the END, never in the middle.
-//!
-//! Every pattern carries a domain word, `command` or `process`: plugin
-//! patterns share one namespace with the host and every other plugin, and
-//! `the output contains "x"` is exactly what the next plugin would also pick.
-//!
-//! Free text — a command, a text, a regex, an env value — is captured with a
-//! greedy `(.*)` up to the closing `"$`, so it may itself contain `"`:
-//! `I run the command "grep "a b" log"` is one command. Names stay `[^"]+`.
+//! Dispatch and the step bodies. The vocabulary they answer to is in
+//! `vocabulary.rs`; the `match` in `route` names every step in it.
+
+mod vocabulary;
 
 use std::path::Path;
+use std::sync::PoisonError;
 
 use regex::Regex;
 use serde_json::{Map, Value, json};
@@ -21,241 +15,8 @@ use crate::instance::Instance;
 use crate::matchers::{self, Delimited};
 use crate::reply::{self, Diagnostic};
 
-/// The four subjects of a stream assertion in one pattern. The host passes
-/// the unmatched `name` group as `""`, which is how "the last command" is
-/// told from a process.
-macro_rules! stream {
-    ($rest:literal) => {
-        concat!(
-            r#"^the (?:command|"(?P<name>[^"]+)" process) (?P<stream>output|error output) "#,
-            $rest
-        )
-    };
-}
-
-/// Same subjects, inside an `extract` sentence.
-macro_rules! extract {
-    ($head:literal, $tail:literal) => {
-        concat!(
-            "^extract ",
-            $head,
-            r#" from the (?:command|"(?P<name>[^"]+)" process) (?P<stream>output|error output) "#,
-            $tail,
-            r#""(?P<var>[^"]+)"$"#
-        )
-    };
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Step {
-    Env,
-    Cwd,
-    Stdin,
-    Timeout,
-    RunShell,
-    RunArgv,
-    StartShell,
-    StartArgv,
-    Stop,
-    ExitCodeIs,
-    ExitCodeIsNot,
-    Running,
-    ExitedWith,
-    Contains,
-    NotContains,
-    Matches,
-    NotMatches,
-    IsEmpty,
-    Equals,
-    Lines,
-    ContainsJson,
-    EqualsJson,
-    NotContainsJson,
-    TableContains,
-    TableEquals,
-    ExtractRegex,
-    ExtractJson,
-}
-
-const ACTION: &str = "action";
-const ASSERTION: &str = "assertion";
-
-const STEPS: &[(Step, &str, &str, &str)] = &[
-    (
-        Step::Env,
-        r#"^the command environment variable "(?P<name>[^"]+)" is "(?P<value>.*)"$"#,
-        ACTION,
-        "sets an environment variable for every command and process started later in this scenario",
-    ),
-    (
-        Step::Cwd,
-        r#"^the command working directory is "(?P<path>[^"]+)"$"#,
-        ACTION,
-        "working directory for the rest of the scenario, relative to the instance cwd",
-    ),
-    (
-        Step::Stdin,
-        r"^the command standard input is:$",
-        ACTION,
-        "the doc string is the standard input of the next one-shot command only",
-    ),
-    (
-        Step::Timeout,
-        r#"^the command timeout is "(?P<seconds>[^"]+)" seconds$"#,
-        ACTION,
-        "overrides the instance timeout_secs for one-shot commands for the rest of the scenario",
-    ),
-    (
-        Step::RunShell,
-        r#"^I run the command "(?P<command>.*)"$"#,
-        ACTION,
-        "runs `<shell> -c <command>` to completion; publishes exec_exit_code, exec_stdout, exec_stderr",
-    ),
-    (
-        Step::RunArgv,
-        r#"^I run the command "(?P<program>[^"]+)" with arguments:$"#,
-        ACTION,
-        "runs a program with no shell, one table row (header `argument`) per argument",
-    ),
-    (
-        Step::StartShell,
-        r#"^I start the "(?P<name>[^"]+)" process running "(?P<command>.*)"$"#,
-        ACTION,
-        "starts `<shell> -c <command>` in the background; it is stopped at the end of the scenario",
-    ),
-    (
-        Step::StartArgv,
-        r#"^I start the "(?P<name>[^"]+)" process running "(?P<program>[^"]+)" with arguments:$"#,
-        ACTION,
-        "starts a program in the background with no shell, one table row (header `argument`) per argument",
-    ),
-    (
-        Step::Stop,
-        r#"^I stop the "(?P<name>[^"]+)" process$"#,
-        ACTION,
-        "asks the whole process tree to stop, waits stop_grace_secs (default 2), then kills it; its exit becomes readable",
-    ),
-    (
-        Step::ExitCodeIs,
-        r"^the command exit code is (?P<code>\d+)$",
-        ASSERTION,
-        "asserts the exit code of the last command",
-    ),
-    (
-        Step::ExitCodeIsNot,
-        r"^the command exit code is not (?P<code>\d+)$",
-        ASSERTION,
-        "asserts the last command did not exit with this code",
-    ),
-    (
-        Step::Running,
-        r#"^the "(?P<name>[^"]+)" process should be running$"#,
-        ASSERTION,
-        "asserts the process has not exited",
-    ),
-    (
-        Step::ExitedWith,
-        r#"^the "(?P<name>[^"]+)" process should have exited with code (?P<code>\d+)$"#,
-        ASSERTION,
-        "asserts the process has exited with this code; while it runs, the answer is not yet",
-    ),
-    (
-        Step::Contains,
-        stream!(r#"contains "(?P<text>.*)"$"#),
-        ASSERTION,
-        "asserts the stream contains the text",
-    ),
-    (
-        Step::NotContains,
-        stream!(r#"does not contain "(?P<text>.*)"$"#),
-        ASSERTION,
-        "asserts the stream does not contain the text",
-    ),
-    (
-        Step::Matches,
-        stream!(r#"matches "(?P<regex>.*)"$"#),
-        ASSERTION,
-        "asserts the regex (unanchored) matches the stream",
-    ),
-    (
-        Step::NotMatches,
-        stream!(r#"does not match "(?P<regex>.*)"$"#),
-        ASSERTION,
-        "asserts the regex (unanchored) does not match the stream",
-    ),
-    (
-        Step::IsEmpty,
-        stream!(r"is empty$"),
-        ASSERTION,
-        "asserts the stream is empty",
-    ),
-    (
-        Step::Equals,
-        stream!(r"equals:$"),
-        ASSERTION,
-        "asserts the stream equals the doc string; one trailing newline of the stream is ignored",
-    ),
-    (
-        Step::Lines,
-        stream!(r"has (?P<count>\d+) lines?$"),
-        ASSERTION,
-        "asserts the number of lines in the stream",
-    ),
-    (
-        Step::ContainsJson,
-        stream!(r"contains JSON:$"),
-        ASSERTION,
-        "asserts the stream, parsed as JSON, contains the doc string: object subset, unordered arrays",
-    ),
-    (
-        Step::EqualsJson,
-        stream!(r"equals JSON:$"),
-        ASSERTION,
-        "asserts the stream, parsed as JSON, equals the doc string exactly",
-    ),
-    (
-        Step::NotContainsJson,
-        stream!(r"does not contain JSON:$"),
-        ASSERTION,
-        "asserts the stream, parsed as JSON, does not contain the doc string",
-    ),
-    (
-        Step::TableContains,
-        stream!(r"as (?P<format>CSV|TSV) contains:$"),
-        ASSERTION,
-        "asserts every table row appears in the stream; the table header names the columns",
-    ),
-    (
-        Step::TableEquals,
-        stream!(r"as (?P<format>CSV|TSV) equals:$"),
-        ASSERTION,
-        "asserts the stream has exactly the table's columns and rows, in order",
-    ),
-    (
-        Step::ExtractRegex,
-        extract!(r#""(?P<regex>.*)""#, "as "),
-        ACTION,
-        "stores the first capture group of the first regex match as a variable",
-    ),
-    (
-        Step::ExtractJson,
-        extract!(r#""(?P<path>[^"]*)""#, "as JSON as "),
-        ACTION,
-        "parses the stream as JSON and stores the value at the path as a variable",
-    ),
-];
-
-pub fn steps_json() -> String {
-    Value::Array(
-        STEPS
-            .iter()
-            .map(|(_, pattern, kind, description)| {
-                json!({"pattern": pattern, "group": "exec", "kind": kind, "description": description})
-            })
-            .collect(),
-    )
-    .to_string()
-}
+pub use vocabulary::steps_json;
+use vocabulary::{STEPS, Step};
 
 /// bddkit 0.2.1 hands a doc string over with the newline after the opening
 /// `"""` and the one before the closing `"""` still attached: `"\npear\n"`
@@ -306,42 +67,9 @@ pub fn route(instance: &mut Instance, index: u32, req: &Request) -> String {
     };
     match step {
         Step::Env => set_env(instance, req.arg(0), req.arg(1)),
-        Step::Cwd => match refuse_nul(&[req.arg(0)]) {
-            Ok(()) => {
-                instance.context.cwd = Some(req.arg(0).to_string());
-                reply::passed()
-            }
-            Err(e) => reply::fatal(&e, &[]),
-        },
-        Step::Stdin => match &req.docstring {
-            Some(text) if !text.contains('\0') => {
-                // A doc string is lines, and a line ends with a newline:
-                // without it `read` in a shell drops the last one.
-                let lines = if text.is_empty() {
-                    String::new()
-                } else {
-                    format!("{text}\n")
-                };
-                instance.context.stdin = Some(lines);
-                reply::passed()
-            }
-            Some(_) => reply::fatal(&nul_refusal(), &[]),
-            None => reply::fatal("this step takes a doc string", &[]),
-        },
-        Step::Timeout => {
-            let parsed = req
-                .arg(0)
-                .trim()
-                .parse::<f64>()
-                .map_err(|_| format!("{:?} is not a number of seconds", req.arg(0)));
-            match parsed.and_then(config::timeout) {
-                Ok(timeout) => {
-                    instance.context.timeout = Some(timeout);
-                    reply::passed()
-                }
-                Err(e) => reply::fatal(&e, &[]),
-            }
-        }
+        Step::Cwd => set_cwd(instance, req),
+        Step::Stdin => set_stdin(instance, req),
+        Step::Timeout => set_timeout(instance, req),
         Step::RunShell => {
             let program = shell(instance, req.arg(0));
             run(instance, req, program)
@@ -358,139 +86,226 @@ pub fn route(instance: &mut Instance, index: u32, req: &Request) -> String {
             Ok(program) => start(instance, req, req.arg(0), program),
             Err(e) => reply::fatal(&e, &[]),
         },
-        Step::Stop => {
-            let grace = instance.config.stop_grace;
-            match instance.process(req.arg(0)) {
-                Some(job) => {
-                    exec::stop_all([&mut *job], grace);
-                    trace(
-                        req,
-                        format_args!("stopped {:?}: {}", req.arg(0), describe_exit(job.exit())),
-                    );
-                    reply::passed()
-                }
-                None => unknown_process(instance, req.arg(0)),
-            }
-        }
+        Step::Stop => stop(instance, req),
         Step::ExitCodeIs | Step::ExitCodeIsNot => {
             exit_code(instance, req, step == Step::ExitCodeIs)
         }
-        Step::Running => match instance.process(req.arg(0)) {
-            Some(job) => match job.poll() {
-                None => reply::passed(),
-                Some(exit) => {
-                    let msg = format!(
-                        "the {:?} process is not running: it ended with {exit}",
-                        req.arg(0)
-                    );
-                    fail(job, req, &msg)
-                }
-            },
-            None => unknown_process(instance, req.arg(0)),
-        },
+        Step::Running => running(instance, req),
         Step::ExitedWith => exited_with(instance, req),
-        Step::Contains => on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-            let want = req.arg(2);
-            check(text.contains(want), || {
-                format!("{subject} does not contain {want:?}")
-            })
-        }),
-        Step::NotContains => on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-            let unwanted = req.arg(2);
-            check(!text.contains(unwanted), || {
-                format!("{subject} contains {unwanted:?}")
-            })
-        }),
-        Step::Matches | Step::NotMatches => {
-            on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-                let re = Regex::new(req.arg(2))
-                    .map_err(|e| Failure::Fatal(format!("invalid regex: {e}")))?;
-                let want = step == Step::Matches;
-                check(re.is_match(text) == want, || {
-                    let verb = if want { "does not match" } else { "matches" };
-                    format!("{subject} {verb} {:?}", req.arg(2))
-                })
-            })
-        }
-        Step::IsEmpty => on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-            check(text.is_empty(), || {
-                format!("{subject} is not empty ({} bytes)", text.len())
-            })
-        }),
-        Step::Equals => on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-            let want = docstring(req)?;
-            // One trailing line ending, whichever the platform writes.
-            let got = text
-                .strip_suffix("\r\n")
-                .or_else(|| text.strip_suffix('\n'))
-                .unwrap_or(text);
-            check(got == want, || {
-                format!(
-                    "{subject} is not equal to the doc string: {}",
-                    first_difference(want, got)
-                )
-            })
-        }),
-        Step::Lines => on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-            let want: usize = req
-                .arg(2)
-                .parse()
-                .map_err(|_| Failure::Fatal(format!("{:?} is not a line count", req.arg(2))))?;
-            let got = text.lines().count();
-            check(got == want, || {
-                format!("{subject} has {got} lines, expected {want}")
-            })
-        }),
-        Step::ContainsJson | Step::EqualsJson | Step::NotContainsJson => {
-            on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-                let expected: Value = serde_json::from_str(docstring(req)?)
-                    .map_err(|e| Failure::Fatal(format!("the doc string is not JSON: {e}")))?;
-                let actual: Value = serde_json::from_str(text)
-                    .map_err(|e| Failure::Mismatch(format!("{subject} is not JSON: {e}")))?;
-                let outcome =
-                    matchers::json_cmp(&actual, &expected, "root", step == Step::EqualsJson);
-                match (step, outcome) {
-                    (Step::NotContainsJson, Ok(())) => {
-                        Err(Failure::Mismatch(format!("{subject} contains the JSON")))
-                    }
-                    (Step::NotContainsJson, Err(_)) | (_, Ok(())) => Ok(None),
-                    (_, Err(why)) => Err(Failure::Mismatch(format!(
-                        "{subject} does not match the JSON:\n  {why}"
-                    ))),
-                }
-            })
-        }
+        Step::Contains => contains(instance, req),
+        Step::NotContains => not_contains(instance, req),
+        Step::Matches | Step::NotMatches => matches_regex(instance, req, step == Step::Matches),
+        Step::IsEmpty => is_empty(instance, req),
+        Step::Equals => equals(instance, req),
+        Step::Lines => line_count(instance, req),
+        Step::ContainsJson => json_step(instance, req, false, false),
+        Step::EqualsJson => json_step(instance, req, true, false),
+        Step::NotContainsJson => json_step(instance, req, false, true),
         Step::TableContains | Step::TableEquals => {
-            on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
-                let format = req.arg(2);
-                let table = req
-                    .table
-                    .as_deref()
-                    .ok_or_else(|| Failure::Fatal("this step takes a table".into()))?;
-                let rows = Delimited::parse(format)
-                    .rows(text)
-                    .map_err(|e| Failure::Mismatch(format!("{subject}: {e}")))?;
-                matchers::table_cmp(&rows, table, step == Step::TableEquals)
-                    .map(|()| None)
-                    .map_err(|why| Failure::Mismatch(format!("{subject} as {format}: {why}")))
-            })
+            table_step(instance, req, step == Step::TableEquals)
         }
-        Step::ExtractRegex => extract(instance, req, |text, subject| {
-            let re = Regex::new(req.arg(0)).map_err(|e| format!("invalid regex: {e}"))?;
-            if re.captures_len() < 2 {
-                return Err("the regex has no capture group; wrap what to extract in (…)".into());
-            }
-            let caps = re
-                .captures(text)
-                .ok_or_else(|| format!("{subject} does not match {:?}", req.arg(0)))?;
-            Ok(caps.get(1).map_or("", |m| m.as_str()).to_string())
-        }),
-        Step::ExtractJson => extract(instance, req, |text, subject| {
-            let v: Value =
-                serde_json::from_str(text).map_err(|e| format!("{subject} is not JSON: {e}"))?;
-            matchers::json_read(&v, req.arg(0)).map(matchers::scalar)
-        }),
+        Step::ExtractRegex => extract_regex(instance, req),
+        Step::ExtractJson => extract_json(instance, req),
     }
+}
+
+fn set_cwd(instance: &mut Instance, req: &Request) -> String {
+    match refuse_nul(&[req.arg(0)]) {
+        Ok(()) => {
+            instance.context.cwd = Some(req.arg(0).to_string());
+            reply::passed()
+        }
+        Err(e) => reply::fatal(&e, &[]),
+    }
+}
+
+fn set_stdin(instance: &mut Instance, req: &Request) -> String {
+    match &req.docstring {
+        Some(text) if !text.contains('\0') => {
+            // A doc string is lines, and a line ends with a newline:
+            // without it `read` in a shell drops the last one.
+            let lines = if text.is_empty() {
+                String::new()
+            } else {
+                format!("{text}\n")
+            };
+            instance.context.stdin = Some(lines);
+            reply::passed()
+        }
+        Some(_) => reply::fatal(&nul_refusal(), &[]),
+        None => reply::fatal("this step takes a doc string", &[]),
+    }
+}
+
+fn set_timeout(instance: &mut Instance, req: &Request) -> String {
+    let parsed = req
+        .arg(0)
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{:?} is not a number of seconds", req.arg(0)));
+    match parsed.and_then(config::timeout) {
+        Ok(timeout) => {
+            instance.context.timeout = Some(timeout);
+            reply::passed()
+        }
+        Err(e) => reply::fatal(&e, &[]),
+    }
+}
+
+fn stop(instance: &mut Instance, req: &Request) -> String {
+    let grace = instance.config.stop_grace;
+    match instance.process(req.arg(0)) {
+        Some(job) => {
+            exec::stop_all([&mut *job], grace);
+            trace(
+                req,
+                format_args!("stopped {:?}: {}", req.arg(0), describe_exit(job.exit())),
+            );
+            reply::passed()
+        }
+        None => unknown_process(instance, req.arg(0)),
+    }
+}
+
+fn running(instance: &mut Instance, req: &Request) -> String {
+    match instance.process(req.arg(0)) {
+        Some(job) => match job.poll() {
+            None => reply::passed(),
+            Some(exit) => {
+                let msg = format!(
+                    "the {:?} process is not running: it ended with {exit}",
+                    req.arg(0)
+                );
+                fail(job, req, &msg)
+            }
+        },
+        None => unknown_process(instance, req.arg(0)),
+    }
+}
+
+fn contains(instance: &mut Instance, req: &Request) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let want = req.arg(2);
+        check(text.contains(want), || {
+            format!("{subject} does not contain {want:?}")
+        })
+    })
+}
+
+fn not_contains(instance: &mut Instance, req: &Request) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let unwanted = req.arg(2);
+        check(!text.contains(unwanted), || {
+            format!("{subject} contains {unwanted:?}")
+        })
+    })
+}
+
+fn matches_regex(instance: &mut Instance, req: &Request, want: bool) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let re =
+            Regex::new(req.arg(2)).map_err(|e| Failure::Fatal(format!("invalid regex: {e}")))?;
+        check(re.is_match(text) == want, || {
+            let verb = if want { "does not match" } else { "matches" };
+            format!("{subject} {verb} {:?}", req.arg(2))
+        })
+    })
+}
+
+fn is_empty(instance: &mut Instance, req: &Request) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        check(text.is_empty(), || {
+            format!("{subject} is not empty ({} bytes)", text.len())
+        })
+    })
+}
+
+fn equals(instance: &mut Instance, req: &Request) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let want = docstring(req)?;
+        // One trailing line ending, whichever the platform writes.
+        let got = text
+            .strip_suffix("\r\n")
+            .or_else(|| text.strip_suffix('\n'))
+            .unwrap_or(text);
+        check(got == want, || {
+            format!(
+                "{subject} is not equal to the doc string: {}",
+                first_difference(want, got)
+            )
+        })
+    })
+}
+
+fn line_count(instance: &mut Instance, req: &Request) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let want: usize = req
+            .arg(2)
+            .parse()
+            .map_err(|_| Failure::Fatal(format!("{:?} is not a line count", req.arg(2))))?;
+        let got = text.lines().count();
+        check(got == want, || {
+            format!("{subject} has {got} lines, expected {want}")
+        })
+    })
+}
+
+/// `strict` is `equals JSON` rather than `contains JSON`; `negated` is `does
+/// not contain JSON`.
+fn json_step(instance: &mut Instance, req: &Request, strict: bool, negated: bool) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let expected: Value = serde_json::from_str(docstring(req)?)
+            .map_err(|e| Failure::Fatal(format!("the doc string is not JSON: {e}")))?;
+        let actual: Value = serde_json::from_str(text)
+            .map_err(|e| Failure::Mismatch(format!("{subject} is not JSON: {e}")))?;
+        match (
+            negated,
+            matchers::json_cmp(&actual, &expected, "root", strict),
+        ) {
+            (true, Ok(())) => Err(Failure::Mismatch(format!("{subject} contains the JSON"))),
+            (true, Err(_)) | (false, Ok(())) => Ok(None),
+            (false, Err(why)) => Err(Failure::Mismatch(format!(
+                "{subject} does not match the JSON:\n  {why}"
+            ))),
+        }
+    })
+}
+
+fn table_step(instance: &mut Instance, req: &Request, strict: bool) -> String {
+    on_stream(instance, req, req.arg(0), req.arg(1), |text, subject| {
+        let format = req.arg(2);
+        let table = req
+            .table
+            .as_deref()
+            .ok_or_else(|| Failure::Fatal("this step takes a table".into()))?;
+        let rows = Delimited::parse(format)
+            .rows(text)
+            .map_err(|e| Failure::Mismatch(format!("{subject}: {e}")))?;
+        matchers::table_cmp(&rows, table, strict)
+            .map(|()| None)
+            .map_err(|why| Failure::Mismatch(format!("{subject} as {format}: {why}")))
+    })
+}
+
+fn extract_regex(instance: &mut Instance, req: &Request) -> String {
+    extract(instance, req, |text, subject| {
+        let re = Regex::new(req.arg(0)).map_err(|e| format!("invalid regex: {e}"))?;
+        if re.captures_len() < 2 {
+            return Err("the regex has no capture group; wrap what to extract in (…)".into());
+        }
+        let caps = re
+            .captures(text)
+            .ok_or_else(|| format!("{subject} does not match {:?}", req.arg(0)))?;
+        Ok(caps.get(1).map_or("", |m| m.as_str()).to_string())
+    })
+}
+
+fn extract_json(instance: &mut Instance, req: &Request) -> String {
+    extract(instance, req, |text, subject| {
+        let v: Value =
+            serde_json::from_str(text).map_err(|e| format!("{subject} is not JSON: {e}"))?;
+        matchers::json_read(&v, req.arg(0)).map(matchers::scalar)
+    })
 }
 
 fn nul_refusal() -> String {
@@ -606,7 +421,7 @@ fn run(instance: &mut Instance, req: &Request, program: Program) -> String {
                 "exec_stderr": exec::text_of(&job.stderr),
             });
             instance.last = Some(job);
-            reply::passed_with(vars)
+            reply::passed_with(&vars)
         }
     }
 }
@@ -760,9 +575,9 @@ fn subject<'a>(
     if name.is_empty() {
         let job = instance.last.as_mut().ok_or(NO_COMMAND)?;
         Ok((job, format!("the command {stream}")))
-    } else if instance.process(name).is_some() {
+    } else if let Some(i) = instance.processes.iter().position(|(n, _)| n == name) {
         Ok((
-            instance.process(name).expect("just found"),
+            &mut instance.processes[i].1,
             format!("the {name:?} process {stream}"),
         ))
     } else {
@@ -789,7 +604,7 @@ fn on_stream(
         &job.stdout
     };
     let (text, overflowed) = {
-        let c = capture.lock().unwrap_or_else(|e| e.into_inner());
+        let c = capture.lock().unwrap_or_else(PoisonError::into_inner);
         (c.text(), c.overflowed)
     };
     if overflowed {
@@ -800,7 +615,7 @@ fn on_stream(
         return fail(job, req, &msg);
     }
     match check(&text, &subject) {
-        Ok(Some(vars)) => reply::passed_with(vars),
+        Ok(Some(vars)) => reply::passed_with(&vars),
         Ok(None) => reply::passed(),
         // Only a stream that can still grow is worth another look: the last
         // command's is final, and so is a process's once it has ended and
@@ -900,71 +715,6 @@ fn stream_evidence(title: &str, text: String, files: Option<&Request>) -> Diagno
 mod tests {
     use super::*;
 
-    fn compiled() -> Vec<Regex> {
-        STEPS
-            .iter()
-            .map(|(_, p, ..)| Regex::new(p).expect("pattern compiles"))
-            .collect()
-    }
-
-    /// One sample sentence per step, in table order.
-    const SAMPLES: &[&str] = &[
-        r#"the command environment variable "APP_ENV" is "test""#,
-        r#"the command working directory is "bin""#,
-        "the command standard input is:",
-        r#"the command timeout is "5" seconds"#,
-        r#"I run the command "echo hi""#,
-        r#"I run the command "echo" with arguments:"#,
-        r#"I start the "log" process running "tail -F x""#,
-        r#"I start the "log" process running "tail" with arguments:"#,
-        r#"I stop the "log" process"#,
-        "the command exit code is 0",
-        "the command exit code is not 0",
-        r#"the "log" process should be running"#,
-        r#"the "log" process should have exited with code 0"#,
-        r#"the command output contains "x""#,
-        r#"the "log" process error output does not contain "x""#,
-        r#"the command error output matches "x+""#,
-        r#"the command output does not match "x+""#,
-        "the command error output is empty",
-        "the command output equals:",
-        "the command output has 1 line",
-        "the command output contains JSON:",
-        "the command output equals JSON:",
-        "the command output does not contain JSON:",
-        r#"the "log" process output as CSV contains:"#,
-        "the command output as TSV equals:",
-        r#"extract "id=(\d+)" from the command output as "id""#,
-        r#"extract "data.id" from the "log" process output as JSON as "id""#,
-    ];
-
-    #[test]
-    fn every_sample_matches_its_own_step_and_no_other() {
-        let patterns = compiled();
-        assert_eq!(SAMPLES.len(), STEPS.len(), "one sample per step");
-        for (i, sample) in SAMPLES.iter().enumerate() {
-            let matched: Vec<usize> = (0..patterns.len())
-                .filter(|&j| patterns[j].is_match(sample))
-                .collect();
-            assert_eq!(matched, vec![i], "{sample:?} matched {matched:?}");
-        }
-    }
-
-    #[test]
-    fn every_pattern_carries_a_domain_word_and_names_its_groups() {
-        for (_, pattern, ..) in STEPS {
-            assert!(
-                pattern.contains("command") || pattern.contains("process"),
-                "{pattern}"
-            );
-            assert!(
-                pattern.starts_with('^') && pattern.ends_with('$'),
-                "{pattern}"
-            );
-            assert!(!pattern.contains("(["), "an unnamed group in {pattern}");
-        }
-    }
-
     #[test]
     fn the_first_difference_names_the_line() {
         assert_eq!(
@@ -1001,40 +751,5 @@ mod tests {
         assert_eq!(unframe("\n"), "", "an empty doc string");
         assert_eq!(unframe("pear"), "pear");
         assert_eq!(unframe("\nblank first line"), "\nblank first line");
-    }
-
-    #[test]
-    fn free_text_may_contain_quotes() {
-        let run = Regex::new(STEPS[Step::RunShell as usize].1).expect("pattern");
-        assert_eq!(
-            &run.captures(r#"I run the command "grep "a b" log""#)
-                .expect("match")["command"],
-            r#"grep "a b" log"#
-        );
-        let extract = Regex::new(STEPS[Step::ExtractRegex as usize].1).expect("pattern");
-        let caps = extract
-            .captures(r#"extract "id="(\d+)"" from the "p" process output as "id""#)
-            .expect("match");
-        assert_eq!(
-            (&caps["regex"], &caps["name"], &caps["var"]),
-            (r#"id="(\d+)""#, "p", "id")
-        );
-    }
-
-    #[test]
-    fn the_command_subject_leaves_the_name_group_empty() {
-        let re = Regex::new(STEPS[Step::Contains as usize].1).expect("pattern");
-        let caps = re
-            .captures(r#"the command error output contains "x""#)
-            .expect("match");
-        assert!(caps.name("name").is_none());
-        assert_eq!(&caps["stream"], "error output");
-    }
-
-    #[test]
-    fn the_enum_order_is_the_table_order() {
-        for (i, (step, ..)) in STEPS.iter().enumerate() {
-            assert_eq!(*step as usize, i, "{step:?}");
-        }
     }
 }

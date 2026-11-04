@@ -6,6 +6,13 @@
 //! `../bddkit` build; without one every test skips itself, saying why.
 //! `examples/` is what runs first: the example and the proof are one thing.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "`allow-*-in-tests` covers only `#[test]` functions, not the helpers here"
+)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;

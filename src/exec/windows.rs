@@ -88,11 +88,15 @@ pub struct Tree {
 // SAFETY: a job handle is a kernel object handle, usable from any thread;
 // TerminateJobObject and GenerateConsoleCtrlEvent take no exclusive access.
 unsafe impl Send for Tree {}
+// SAFETY: `&Tree` only reaches those same two calls, which the kernel
+// serializes; `CloseHandle` runs in `Drop`, which has exclusive access.
 unsafe impl Sync for Tree {}
 
 impl Tree {
     /// Puts the suspended child in a fresh job, then lets it run.
     pub fn adopt(child: &mut Child) -> io::Result<Self> {
+        // SAFETY: both arguments are documented as optional: default security
+        // and an unnamed job.
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
             return Err(io::Error::last_os_error());
@@ -101,19 +105,30 @@ impl Tree {
             job,
             group: child.id(),
         };
+        // SAFETY: a plain C struct of integers, for which all zeroes is valid.
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the size of this fixed C struct is far below u32::MAX"
+        )]
+        let size = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        // SAFETY: `job` was checked above, and the pointer and size describe
+        // `limits`, the struct this information class takes, alive for the call.
         let set = unsafe {
             SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
                 (&raw const limits).cast(),
-                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                size,
             )
         };
-        if set == 0
-            || unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } == 0
-        {
+        if set == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `job` was checked above, and `child` owns its process handle
+        // for at least this call.
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) } == 0 {
             return Err(io::Error::last_os_error());
         }
         resume(child.id())?;
@@ -124,10 +139,14 @@ impl Tree {
     /// caller then skips the grace period — when bddkit has no console to
     /// share, as under a service manager.
     pub fn interrupt(&self) -> bool {
+        // SAFETY: takes two integers and no pointer; an unknown group only
+        // makes it return 0.
         unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.group) != 0 }
     }
 
     pub fn kill(&self) {
+        // SAFETY: `self.job` stays open until `Drop`, which cannot run while
+        // this borrow of `self` lives.
         unsafe { TerminateJobObject(self.job, TERMINATED) };
     }
 }
@@ -135,6 +154,7 @@ impl Tree {
 impl Drop for Tree {
     fn drop(&mut self) {
         // KILL_ON_JOB_CLOSE: closing the last handle ends whatever is left.
+        // SAFETY: `Tree` owns this handle, and `Drop` runs once, last.
         unsafe { CloseHandle(self.job) };
     }
 }
@@ -143,26 +163,40 @@ impl Drop for Tree {
 /// exactly one, but the snapshot is the documented way to find it without
 /// the thread handle `std::process` does not expose.
 fn resume(pid: u32) -> io::Result<()> {
+    // SAFETY: takes two integers and no pointer.
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: a plain C struct of integers, for which all zeroes is valid.
     let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
-    entry.dwSize = size_of::<THREADENTRY32>() as u32;
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the size of this fixed C struct is far below u32::MAX"
+    )]
+    let size = size_of::<THREADENTRY32>() as u32;
+    entry.dwSize = size;
     let mut resumed = 0;
-    let mut more = unsafe { Thread32First(snapshot, &mut entry) } != 0;
+    // SAFETY: `snapshot` was checked above, and `entry` is live, exclusively
+    // borrowed for the call, with `dwSize` set as the API requires.
+    let mut more = unsafe { Thread32First(snapshot, &raw mut entry) } != 0;
     while more {
         if entry.th32OwnerProcessID == pid {
+            // SAFETY: takes three integers and no pointer.
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if !thread.is_null() {
+                // SAFETY: `thread` was just opened and checked not to be null.
                 if unsafe { ResumeThread(thread) } != u32::MAX {
                     resumed += 1;
                 }
+                // SAFETY: opened above, closed once, not used after this.
                 unsafe { CloseHandle(thread) };
             }
         }
-        more = unsafe { Thread32Next(snapshot, &mut entry) } != 0;
+        // SAFETY: as for `Thread32First` above.
+        more = unsafe { Thread32Next(snapshot, &raw mut entry) } != 0;
     }
+    // SAFETY: opened above, closed once, not used after this.
     unsafe { CloseHandle(snapshot) };
     if resumed == 0 {
         return Err(io::Error::other("the new process has no thread to resume"));
@@ -179,7 +213,7 @@ pub fn peek_exit(child: &mut Child) -> Option<Exit> {
 
 pub fn exit_of(status: ExitStatus) -> Exit {
     match status.code() {
-        Some(code) if code as u32 == TERMINATED => Exit::Terminated,
+        Some(code) if code.cast_unsigned() == TERMINATED => Exit::Terminated,
         Some(code) => Exit::Code(code),
         None => Exit::Terminated,
     }
@@ -192,13 +226,17 @@ pub fn alive(pid: u32) -> bool {
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
+    // SAFETY: takes three integers and no pointer.
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         return false;
     }
     let mut code = 0u32;
-    let running =
-        unsafe { GetExitCodeProcess(process, &mut code) } != 0 && code == STILL_ACTIVE as u32;
+    // SAFETY: `process` was checked above, and `code` is live and exclusively
+    // borrowed for the call.
+    let got = unsafe { GetExitCodeProcess(process, &raw mut code) } != 0;
+    let running = got && code == STILL_ACTIVE as u32;
+    // SAFETY: opened above, closed once, not used after this.
     unsafe { CloseHandle(process) };
     running
 }

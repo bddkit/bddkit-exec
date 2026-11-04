@@ -156,12 +156,11 @@ fn csv_rows(text: &str) -> Result<Vec<Vec<String>>, String> {
                             cell.push('"');
                         }
                         Some('"') => break,
-                        Some(c) => {
-                            if c == '\n' {
-                                line += 1;
-                            }
-                            cell.push(c);
+                        Some('\n') => {
+                            line += 1;
+                            cell.push('\n');
                         }
+                        Some(c) => cell.push(c),
                         None => {
                             return Err(format!("CSV line {line}: a quoted cell is never closed"));
                         }
@@ -273,7 +272,7 @@ mod tests {
 
     fn rows(t: &[&[&str]]) -> Vec<Vec<String>> {
         t.iter()
-            .map(|r| r.iter().map(|c| c.to_string()).collect())
+            .map(|r| r.iter().map(ToString::to_string).collect())
             .collect()
     }
 

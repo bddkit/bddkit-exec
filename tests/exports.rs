@@ -2,6 +2,13 @@
 //! JSON out, every returned string handed back to `bddkit_free_string`.
 //! Needs no `bddkit` binary.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "`allow-*-in-tests` covers only `#[test]` functions, not the helpers here"
+)]
+
 use std::ffi::{CStr, CString, c_char};
 
 use bddkit_exec::*;
@@ -28,19 +35,23 @@ mod line {
 
 fn call(reply: *mut c_char) -> Value {
     assert!(!reply.is_null(), "an export returned NULL");
+    // SAFETY: not null (asserted above), and every reply of this library comes
+    // from `CString::into_raw`, so it is NUL-terminated and lives until it is
+    // freed below.
     let text = unsafe { CStr::from_ptr(reply) }
         .to_string_lossy()
         .into_owned();
+    // SAFETY: an export returned it, and this is the one place it is freed.
     unsafe { bddkit_free_string(reply) };
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("not JSON ({e}): {text}"))
 }
 
-fn cstr(v: Value) -> CString {
+fn cstr(v: &Value) -> CString {
     CString::new(v.to_string()).expect("no NUL")
 }
 
-fn instance_request(config: Value) -> CString {
-    cstr(json!({"group": "exec", "instance": "t", "config": config, "options": {}}))
+fn instance_request(config: &Value) -> CString {
+    cstr(&json!({"group": "exec", "instance": "t", "config": config, "options": {}}))
 }
 
 fn step_index(pattern_start: &str) -> u32 {
@@ -78,7 +89,7 @@ fn dispatch_into(
     artifacts: &std::path::Path,
 ) -> Value {
     let workspace = std::env::temp_dir();
-    let request = cstr(json!({
+    let request = cstr(&json!({
         "args": args, "docstring": docstring, "table": null,
         "artifacts_dir": artifacts.display().to_string(),
         "workspace_dir": workspace.display().to_string(),
@@ -91,7 +102,7 @@ fn dispatch_into(
     ))
 }
 
-fn init(config: Value) -> u64 {
+fn init(config: &Value) -> u64 {
     let reply = call(bddkit_init_instance(instance_request(config).as_ptr()));
     assert_eq!(reply["ok"], true, "{reply}");
     reply["handle"].as_u64().expect("handle")
@@ -114,7 +125,7 @@ fn the_manifest_and_the_step_list_parse() {
 #[test]
 fn validate_config_refuses_a_typo_and_accepts_the_implicit_body() {
     let bad = call(bddkit_validate_config(
-        instance_request(json!({"timeout": 5})).as_ptr(),
+        instance_request(&json!({"timeout": 5})).as_ptr(),
     ));
     assert_eq!(bad["ok"], false);
     assert!(
@@ -124,13 +135,15 @@ fn validate_config_refuses_a_typo_and_accepts_the_implicit_body() {
             .contains("\"timeout\""),
         "{bad}"
     );
-    let good = call(bddkit_validate_config(instance_request(json!({})).as_ptr()));
+    let good = call(bddkit_validate_config(
+        instance_request(&json!({})).as_ptr(),
+    ));
     assert_eq!(good, json!({"ok": true}));
 }
 
 #[test]
 fn a_run_publishes_its_variables_and_the_last_command_is_assertable() {
-    let handle = init(json!({"env": {"WHO": "exports"}}));
+    let handle = init(&json!({"env": {"WHO": "exports"}}));
     let ran = dispatch(
         handle,
         "^I run the command \"(?P<command>",
@@ -156,7 +169,7 @@ fn a_run_publishes_its_variables_and_the_last_command_is_assertable() {
 
 #[test]
 fn a_mismatch_on_a_live_process_is_not_yet_and_the_reset_forgets_it() {
-    let handle = init(json!({}));
+    let handle = init(&json!({}));
     let started = dispatch(
         handle,
         "^I start the \"(?P<name>[^\"]+)\" process running \"(?P<command>",
@@ -183,7 +196,7 @@ fn a_mismatch_on_a_live_process_is_not_yet_and_the_reset_forgets_it() {
 
 #[test]
 fn every_handle_is_distinct_and_an_unknown_one_is_refused() {
-    let (a, b) = (init(json!({})), init(json!({})));
+    let (a, b) = (init(&json!({})), init(&json!({})));
     assert_ne!(a, b);
     call(bddkit_drop_instance(a));
     call(bddkit_drop_instance(b));
@@ -200,7 +213,7 @@ const CONTAINS: &str =
 
 #[test]
 fn an_out_of_range_timeout_is_refused_not_a_panic() {
-    let handle = init(json!({}));
+    let handle = init(&json!({}));
     let reply = dispatch(handle, "^the command timeout is", &["1e19"], None);
     assert_eq!(reply["status"], "fatal");
     assert!(
@@ -211,7 +224,7 @@ fn an_out_of_range_timeout_is_refused_not_a_panic() {
         "{reply}"
     );
     let config = call(bddkit_validate_config(
-        instance_request(json!({"timeout_secs": 1e20})).as_ptr(),
+        instance_request(&json!({"timeout_secs": 1e20})).as_ptr(),
     ));
     assert!(
         config["error"]
@@ -225,7 +238,7 @@ fn an_out_of_range_timeout_is_refused_not_a_panic() {
 
 #[test]
 fn not_yet_on_a_big_stream_keeps_its_tail_inline_and_writes_nothing() {
-    let handle = init(json!({}));
+    let handle = init(&json!({}));
     let start = "^I start the \"(?P<name>[^\"]+)\" process running \"(?P<command>";
     let big = line::BIG_THEN_SLEEP;
     assert_eq!(
@@ -275,7 +288,7 @@ fn not_yet_on_a_big_stream_keeps_its_tail_inline_and_writes_nothing() {
 
 #[test]
 fn a_mismatch_on_a_process_that_has_ended_is_fatal_not_not_yet() {
-    let handle = init(json!({}));
+    let handle = init(&json!({}));
     let start = "^I start the \"(?P<name>[^\"]+)\" process running \"(?P<command>";
     assert_eq!(
         dispatch(handle, start, &["brief", "echo done"], None)["status"],
@@ -301,7 +314,7 @@ fn a_mismatch_on_a_process_that_has_ended_is_fatal_not_not_yet() {
 
 #[test]
 fn a_drop_stops_a_running_command_at_once_and_the_step_says_why() {
-    let handle = init(json!({"timeout_secs": 60, "stop_grace_secs": 2}));
+    let handle = init(&json!({"timeout_secs": 60, "stop_grace_secs": 2}));
     let running = std::thread::spawn(move || {
         dispatch(
             handle,
