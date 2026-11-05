@@ -7,7 +7,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -147,7 +147,10 @@ impl Capture {
 
 /// The text so far, whether or not a reader panicked holding the lock.
 pub fn text_of(capture: &Mutex<Capture>) -> String {
-    capture.lock().unwrap_or_else(|e| e.into_inner()).text()
+    capture
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .text()
 }
 
 fn reader(
@@ -167,7 +170,7 @@ fn reader(
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
             };
-            let mut c = sink.lock().unwrap_or_else(|e| e.into_inner());
+            let mut c = sink.lock().unwrap_or_else(PoisonError::into_inner);
             let room = cap.saturating_sub(c.bytes.len());
             c.bytes.extend_from_slice(&chunk[..n.min(room)]);
             if n > room {
@@ -203,7 +206,7 @@ impl Registry {
     }
 
     fn live(&self) -> std::sync::MutexGuard<'_, Live> {
-        self.live.lock().unwrap_or_else(|e| e.into_inner())
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Asks every listed tree to stop (SIGTERM / CTRL_BREAK) and starts the
@@ -271,7 +274,9 @@ impl Job {
                 let _ = pipe.write_all(text.as_bytes());
             });
         }
+        #[expect(clippy::expect_used, reason = "`Spec::command` always pipes stdout")]
         let (stdout, out_reader) = reader(child.stdout.take().expect("piped stdout"), cap);
+        #[expect(clippy::expect_used, reason = "`Spec::command` always pipes stderr")]
         let (stderr, err_reader) = reader(child.stderr.take().expect("piped stderr"), cap);
         {
             let mut live = registry.live();
@@ -402,7 +407,7 @@ pub fn stop_all<'a>(jobs: impl IntoIterator<Item = &'a mut Job>, grace: Duration
     let mut jobs: Vec<&mut Job> = jobs.into_iter().collect();
     let mut asked = false;
     if !grace.is_zero() {
-        for job in jobs.iter_mut() {
+        for job in &mut jobs {
             if job.poll().is_none() {
                 asked |= job.tree.interrupt();
             }
@@ -412,10 +417,10 @@ pub fn stop_all<'a>(jobs: impl IntoIterator<Item = &'a mut Job>, grace: Duration
     while asked && jobs.iter_mut().any(|j| j.poll().is_none()) && Instant::now() < deadline {
         thread::sleep(POLL);
     }
-    for job in jobs.iter_mut() {
+    for job in &mut jobs {
         job.finish();
     }
-    for job in jobs.iter_mut() {
+    for job in &mut jobs {
         job.drain(DRAIN);
     }
 }
@@ -505,7 +510,7 @@ pub mod script {
     }
 
     /// cmd.exe ends its lines with `\r\n`; the assertions are about content.
-    pub fn lf(text: String) -> String {
+    pub fn lf(text: &str) -> String {
         text.replace("\r\n", "\n")
     }
 }
@@ -516,7 +521,7 @@ mod tests {
     use super::*;
 
     fn text(c: &Arc<Mutex<Capture>>) -> String {
-        lf(text_of(c))
+        lf(&text_of(c))
     }
 
     fn registry() -> Arc<Registry> {
@@ -694,7 +699,7 @@ mod tests {
     fn exits_render_codes_in_decimal_and_ntstatus_in_hex() {
         assert_eq!(Exit::Code(2).to_string(), "exit code 2");
         assert_eq!(
-            Exit::Code(0xC000_013A_u32 as i32).to_string(),
+            Exit::Code(0xC000_013A_u32.cast_signed()).to_string(),
             "exit code 0xC000013A"
         );
         #[cfg(unix)]

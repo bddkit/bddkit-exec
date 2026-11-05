@@ -32,6 +32,10 @@ pub struct Tree {
 }
 
 impl Tree {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "both adapters expose one signature, and the Windows one can fail"
+    )]
     pub fn adopt(child: &mut Child) -> io::Result<Self> {
         Ok(Self {
             pgid: child.id() as libc::pid_t,
@@ -49,20 +53,33 @@ impl Tree {
     }
 
     fn signal(&self, signal: i32) {
+        // SAFETY: `kill` takes two integers and touches no memory of ours. The
+        // group id cannot have been reused: see `Tree`.
         unsafe { libc::kill(-self.pgid, signal) };
     }
 }
 
 /// `waitid(WNOWAIT)`: reads the leader's exit and leaves it a zombie.
 pub fn peek_exit(child: &mut Child) -> Option<Exit> {
+    // SAFETY: `siginfo_t` is a plain C struct, for which all zeroes is valid.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
-    if unsafe { libc::waitid(libc::P_PID, child.id() as libc::id_t, &mut info, flags) } != 0 {
+    // SAFETY: `info` is a live, exclusively borrowed `siginfo_t` for the call to
+    // write into, and the call keeps no pointer to it.
+    if unsafe { libc::waitid(libc::P_PID, child.id() as libc::id_t, &raw mut info, flags) } != 0 {
         return None;
     }
     // Linux exposes the union members through methods, macOS as fields.
     #[cfg(target_os = "linux")]
-    let (exited, status) = unsafe { (info.si_pid(), info.si_status()) };
+    let (exited, status) = {
+        // SAFETY: `info` was zeroed before `waitid` and the kernel writes only
+        // integers into it, so these bytes are initialized whichever union
+        // member they hold, and any bit pattern is a valid `pid_t`.
+        let exited = unsafe { info.si_pid() };
+        // SAFETY: as above, and any bit pattern is a valid `c_int`.
+        let status = unsafe { info.si_status() };
+        (exited, status)
+    };
     #[cfg(not(target_os = "linux"))]
     let (exited, status) = (info.si_pid, info.si_status);
     let exit = if info.si_code == libc::CLD_EXITED {
@@ -99,5 +116,6 @@ pub fn signal_name(signal: i32) -> String {
 /// For tests: whether a pid names a live (or zombie) process.
 #[cfg(test)]
 pub fn alive(pid: u32) -> bool {
+    // SAFETY: `kill` takes two integers; signal 0 only checks that the pid exists.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
