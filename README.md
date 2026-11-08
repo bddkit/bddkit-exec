@@ -154,6 +154,7 @@ The plugin has one adapter per OS family (`src/exec/unix.rs`, `src/exec/windows.
 | Process tree | a process group | a Job Object; the child starts suspended and is placed in the job before it runs, so nothing it starts escapes |
 | `I stop` | SIGTERM to the group, `stop_grace_secs`, SIGKILL | CTRL_BREAK to the child's console process group, `stop_grace_secs`, `TerminateJobObject`. CTRL_BREAK needs a console shared with `bddkit`; without one (a service, some CI agents) the grace is skipped |
 | A stop the process did not survive | `killed by SIGTERM (15)` | `terminated by bddkit-exec`, or `exit code 0xC000013A` when the program ended on the CTRL_BREAK itself |
+| A clean stop | a process that traps SIGTERM exits with its own code | only a program that handles Break itself (PowerShell with a `CancelKeyPress` hook, node with `SIGBREAK`) exits cleanly; Git Bash does not turn CTRL_BREAK into SIGINT, so its `trap` never runs and it ends with `0xC000013A` |
 | `bddkit` itself killed mid-run | the commands survive — see above | the commands die with it |
 | Default `shell` | `sh`: `sh -c <command>` | `cmd`: `cmd /S /C "<command>"`, passed as written — cmd.exe parses its own command line |
 | Other shells | `<shell> -c <command>` | `powershell` / `pwsh`: `-NoProfile -Command <command>`; anything else (Git Bash, MSYS2, Cygwin): `-c <command>` |
