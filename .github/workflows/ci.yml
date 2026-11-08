@@ -10,6 +10,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # The host the plugin is tested against: the ABI 4 candidate, installed from
+  # its tag and never from a floating branch, so a red run means this plugin
+  # broke. Raise it when a newer candidate or release is out.
+  HOST_TAG: v0.5.0-rc.2
 
 jobs:
   test:
@@ -50,7 +54,7 @@ jobs:
       - run: cargo test --locked --lib --test exports
 
   e2e:
-    name: e2e against a published bddkit (${{ matrix.os }})
+    name: e2e against bddkit ${{ env.HOST_TAG }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -62,12 +66,26 @@ jobs:
         with:
           toolchain: "1.97.1"
           rustflags: ""
-      # The host comes from crates.io at a pinned version, never a floating
-      # branch: a red run here must mean this plugin broke. 0.2.1 is the
-      # first release that reads `implicit_instance`, and 0.4.0 the first that
-      # speaks plugin ABI 3.
+      # The host comes from the pinned HOST_TAG, never a floating branch: a red
+      # run here must mean this plugin broke.
+      - name: Cache the host
+        id: host
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/bddkit-host
+          key: bddkit-host-${{ env.HOST_TAG }}-${{ runner.os }}
       - name: Install bddkit
-        run: cargo install bddkit --version 0.4.0 --locked
+        if: steps.host.outputs.cache-hit != 'true'
+        shell: bash
+        run: >-
+          cargo install --git https://github.com/bddkit/bddkit --tag "$HOST_TAG"
+          --locked --root "$RUNNER_TEMP/bddkit-host" bddkit
+      - name: Use the host
+        shell: bash
+        run: |
+          echo "$RUNNER_TEMP/bddkit-host/bin" >> "$GITHUB_PATH"
+          exe=; [ "$RUNNER_OS" = Windows ] && exe=.exe
+          echo "BDDKIT_BIN=$RUNNER_TEMP/bddkit-host/bin/bddkit$exe" >> "$GITHUB_ENV"
       # The example and negative features are written for a POSIX shell;
       # on Windows they run under Git Bash, which the runner image ships.
       # examples/windows.yaml covers cmd.exe and PowerShell.

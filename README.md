@@ -16,7 +16,7 @@ The library is written to `target/release/`.
 
 ## Installing
 
-Tested against `bddkit` 0.2.1 (the version `ci.yml` pins for the end-to-end job, and the first that reads `implicit_instance`). Point a plugin lock file at the built library:
+Tested against the `bddkit` host that `ci.yml` pins for the end-to-end job (`HOST_TAG`); the plugin needs a host that speaks plugin ABI 4 (bddkit 0.5.0 or later). Point a plugin lock file at the built library:
 
 ```yaml
 # .bddkit/plugins.yaml, beside your config

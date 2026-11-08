@@ -2,7 +2,7 @@
 
 Agent orientation for this plugin repository.
 
-`bddkit-exec` is a plugin for `bddkit`, a Gherkin-based acceptance-testing tool in Rust: this plugin runs local commands, keeps long-running ones streaming in the background, and validates what they print (text, JSON, CSV, TSV). It is a `cdylib` loaded by the host at run time; resource group: `exec`; plugin ABI 3 (`bddkit-plugin.json`). `README.md` is the tester-facing description of the steps.
+`bddkit-exec` is a plugin for `bddkit`, a Gherkin-based acceptance-testing tool in Rust: this plugin runs local commands, keeps long-running ones streaming in the background, and validates what they print (text, JSON, CSV, TSV). It is a `cdylib` loaded by the host at run time; resource group: `exec`; plugin ABI 4 (`bddkit-plugin.json`). `README.md` is the tester-facing description of the steps.
 
 ## Where the contract lives
 
