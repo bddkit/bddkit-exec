@@ -241,7 +241,7 @@ fn doctor_live_probes_every_instance() {
     );
     assert!(out.status.success(), "{}", show(&out));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for instance in ["plugin exec.local", "plugin exec.tools"] {
+    for instance in ["exec local", "exec tools"] {
         assert!(stdout.contains(instance), "missing {instance}:\n{stdout}");
     }
     assert!(stdout.contains("probed clean"), "{stdout}");
