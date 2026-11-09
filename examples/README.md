@@ -1,6 +1,6 @@
 # Running the examples
 
-Three configs, run from the repository root — `bddkit` resolves `paths` against the working directory, not the config file's location. Both need `cargo build --release` first (the lock file in `examples/.bddkit/` points at `target/release/`) and a `bddkit` binary that speaks plugin ABI 4 (bddkit 0.5.0 or later). Nothing else: the commands under test are `sh`, `bash`, `tail`, `sort` and friends. On Windows, point `EXEC_SHELL` at Git Bash for the POSIX features (`EXEC_SHELL="C:/Program Files/Git/bin/bash.exe"`); `windows.yaml` needs nothing but Windows.
+Three configs, run from the repository root — `bddkit` resolves `paths` against the working directory, not the config file's location. Both need `cargo build --release` first (the lock file in `examples/.bddkit/` points at `target/release/`) and a `bddkit` binary that speaks plugin ABI 4 (bddkit 0.5.0 or later). Nothing else: the commands under test are `sh`, `bash`, `tail`, `sort` and friends. On Windows, point `EXEC_SHELL` at Git Bash for the POSIX features (`EXEC_SHELL="C:/Program Files/Git/bin/bash.exe"`); `windows.yaml` needs nothing but Windows. On Windows run `examples/features` only, not `examples/posix`: Git Bash does not turn CTRL_BREAK into SIGINT (see the README's Platforms).
 
 ```bash
 bddkit run --config examples/exec.yaml
@@ -15,9 +15,11 @@ bddkit run --config examples/windows.yaml   # Windows only
 | `exec.yaml` | Two instances: `local` (every default, plus an `env` map) and `tools` (`bash`, a shorter timeout, a smaller output cap), `local` the default |
 | `features/commands.feature` | A non-zero exit asserted rather than failing, `equals:` with the trailing newline ignored, `exec_exit_code` read with the host's own variable step, a command carrying its own double quotes, the scenario's environment and working directory, standard input for one command only, the argv form, `extract` with a regex, a per-scenario timeout, `I use "tools" exec` |
 | `features/structured.feature` | `contains JSON:` / `equals JSON:` / `does not contain JSON:` and `extract … as JSON`; CSV with RFC 4180 quoting, `contains` over a subset of columns in any order and `equals`; TSV, which does not quote, with `equals` and with `contains` finding one row by two of its columns |
-| `features/processes.feature` | An eventual assertion re-reading a live process until it passes, awaiting an exit code, two `tail -F` readers and one event with the positive before the negative, `I stop` on a process that traps SIGTERM (and SIGINT, which is what CTRL_BREAK becomes under Git Bash) and the final buffer it leaves |
+| `features/processes.feature` | An eventual assertion re-reading a live process until it passes, awaiting an exit code, two `tail -F` readers and one event with the positive before the negative, a stopped process's final buffer |
+| `posix/stop.feature` | POSIX only: `I stop` on a process that traps SIGTERM and SIGINT, and the final buffer and exit code it leaves |
 | `zero-config.yaml` + `zero-config/hello.feature` | No `resources.exec` at all: the plugin's implicit instance runs the command in the platform's default shell |
 | `windows.yaml` + `windows/shells.feature` | Windows only: cmd.exe with its CRLF output and `%VAR%`, PowerShell selected by name, a background `ping` stopped with its tree, the argv form |
+| `windows/processes.feature` | Windows only: `I stop` on a PowerShell process that handles Break itself, its final buffer and exit code 0 |
 
 The feature files run in parallel (the host's default `concurrency` is 8) and need nothing from each other: every command runs in its own feature file's workspace directory, and every process a scenario starts is stopped when it ends (provided `bddkit` itself is not killed mid-run — see the main README).
 

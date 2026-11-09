@@ -24,17 +24,3 @@ Feature: background processes keep streaming while the scenario goes on
     # On a live stream a negative proves something only after a positive
     # about the same event; against an empty buffer it passes instantly.
     And the "error" process output does not contain "ERROR"
-
-  Scenario: a stopped process leaves a final buffer and a readable exit
-    Given I start the "server" process running "trap 'echo bye; exit 0' TERM INT; echo ready; while :; do sleep 0.1; done"
-    And I expect the next assertion to pass within "5" seconds
-    And the "server" process output contains "ready"
-    When I stop the "server" process
-    Then the "server" process should have exited with code 0
-    And the "server" process output equals:
-      """
-      ready
-      bye
-      """
-    When extract "(\w+)\s*$" from the "server" process output as "lastWord"
-    Then variable "lastWord" should be equal to "bye"

@@ -111,7 +111,18 @@ fn show(out: &Output) -> String {
 #[test]
 fn the_examples_pass() {
     let bin = require_bddkit!();
-    let out = bddkit(&bin, &["run", "--config", "examples/exec.yaml"], &[]);
+    // Git Bash turns no CTRL_BREAK into SIGINT, so examples/posix cannot run
+    // on Windows; a positional path replaces the config's `paths`.
+    let only: &[&str] = if cfg!(windows) {
+        &["examples/features"]
+    } else {
+        &[]
+    };
+    let out = bddkit(
+        &bin,
+        &[&["run", "--config", "examples/exec.yaml"], only].concat(),
+        &[],
+    );
     assert!(out.status.success(), "{}", show(&out));
 }
 
