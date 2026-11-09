@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/bddkit/bddkit-exec/compare/v0.3.0...v0.4.0) - 2026-11-09
+
+### Added
+
+- [**breaking**] move to plugin ABI 4
+
+### Other
+
+- run the SIGTERM/SIGINT trap example on POSIX only, add a Break-aware Windows one
+- point the crate metadata at the bddkit organization
+- enforce the code health limits in Clippy and CI
+- add CLAUDE.md for coding agents
+
 ## [0.3.0](https://github.com/bddkit/bddkit-exec/compare/v0.2.1...v0.3.0) - 2026-10-30
 
 ### Added
