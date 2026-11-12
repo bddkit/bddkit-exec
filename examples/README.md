@@ -1,6 +1,6 @@
 # Running the examples
 
-Three configs, run from the repository root — `bddkit` resolves `paths` against the working directory, not the config file's location. Both need `cargo build --release` first (the lock file in `examples/.bddkit/` points at `target/release/`) and a `bddkit` binary that speaks plugin ABI 4 (bddkit 0.5.0 or later). Nothing else: the commands under test are `sh`, `bash`, `tail`, `sort` and friends. On Windows, point `EXEC_SHELL` at Git Bash for the POSIX features (`EXEC_SHELL="C:/Program Files/Git/bin/bash.exe"`); `windows.yaml` needs nothing but Windows. On Windows run `examples/features` only, not `examples/posix`: Git Bash does not turn CTRL_BREAK into SIGINT (see the README's Platforms).
+Three configs, run from the repository root — `bddkit` resolves `paths` against the working directory, not the config file's location. All three need `cargo build --release` first (the lock file in `examples/.bddkit/` points at `target/release/`) and a `bddkit` binary that speaks plugin ABI 4 (bddkit 0.5.0 or later). Nothing else: the commands under test are `sh`, `bash`, `tail`, `sort` and friends. On Windows, point `EXEC_SHELL` at Git Bash for the POSIX features (`EXEC_SHELL="C:/Program Files/Git/bin/bash.exe"`); `windows.yaml` needs nothing but Windows. On Windows run `examples/features` only, not `examples/posix`: Git Bash does not turn CTRL_BREAK into SIGINT (see the README's Platforms).
 
 ```bash
 bddkit run --config examples/exec.yaml
