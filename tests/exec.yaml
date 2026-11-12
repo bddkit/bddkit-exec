@@ -2,7 +2,6 @@
 # time, and its output checked. Not part of the demo.
 paths: [tests/features]
 resources:
-  api: {}
   exec:
     local:
       shell: ${EXEC_SHELL:-sh}   # Git Bash on Windows; see examples/exec.yaml

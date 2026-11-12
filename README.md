@@ -1,6 +1,6 @@
 # bddkit-exec
 
-A `bddkit` plugin that runs local commands, keeps long-running ones streaming in the background, and validates what they print — as text, JSON, CSV or TSV — in the same scenario as the API and DB steps `bddkit` already provides. Resource group: `exec`.
+A `bddkit` plugin that runs local commands, keeps long-running ones streaming in the background, and validates what they print — as text, JSON, CSV or TSV — in the same scenario as the steps of the other plugins, such as the HTTP and database steps of the `api` and `db` plugins. Resource group: `exec`.
 
 Use it to test the CLI a product ships, invoke a migration or a cron entry point, or follow a log while a request is made.
 
@@ -16,7 +16,7 @@ The library is written to `target/release/`.
 
 ## Installing
 
-Tested against the `bddkit` host that `ci.yml` pins for the end-to-end job (`HOST_TAG`); the plugin needs a host that speaks plugin ABI 4 (bddkit 0.5.0 or later). Point a plugin lock file at the built library:
+Tested against the `bddkit` host that `ci.yml` pins for the end-to-end job (`HOST_TAG`); the plugin needs a host that speaks plugin ABI 4 (bddkit 0.5.0 or later). `bddkit plugin install exec` installs a release; a suite reaches it through its implicit instance, so it is installed by name, not from a `resources` key. For a build of your own, point a plugin lock file at the built library:
 
 ```yaml
 # .bddkit/plugins.yaml, beside your config

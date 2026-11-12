@@ -5,7 +5,6 @@
 # examples/features: examples/posix needs SIGTERM and SIGINT.
 paths: [examples/features, examples/posix]
 resources:
-  api: {}                    # bddkit 0.2.1 requires the key, even with no API
   exec:
     local:                   # cwd and timeout: the defaults
       shell: ${EXEC_SHELL:-sh}

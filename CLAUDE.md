@@ -15,7 +15,7 @@ The authoring contract is `docs/plugin-authoring.md` in the `bddkit/bddkit` repo
 - **Never print to stdout.** The host composes a file's output atomically; a plugin line lands inside another worker's failure dump. Evidence goes back as `diagnostics` in the reply.
 - **`<<null>>` arrives as two real NUL bytes inside a `String`** after the plugin's own JSON parse, so `CString::new(arg)` fails on it. Handle it before building a C string.
 - **Instance config is plain scalars, sequences and mappings.** A YAML tag in a `resources.<group>` body does not parse.
-- **The plugin is written against `docs/plugin-authoring.md` and must never need the host's source.** `Manifest`, `StepSpec` and `DispatchResult` are a hand-copied mirror of the host's types; the document is the only thing keeping them in step.
+- **The plugin is written against `docs/plugin-authoring.md` and must never need the host's source.** The manifest, the step list and every reply are JSON written by hand (`serde_json::json!`) to the shapes the document describes; the document is the only thing keeping them in step with the host.
 
 ## Layout
 
