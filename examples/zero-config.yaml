@@ -1,3 +1,3 @@
 # No `resources.exec` at all: the plugin's implicit instance serves the group.
-paths: [examples/zero-config]
+paths: [zero-config]
 resources: {}

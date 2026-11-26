@@ -84,8 +84,8 @@ fn lock_dir() -> &'static Path {
     })
 }
 
-/// `bddkit <args> --bddkit-dir <lock>` from the repository root, where the
-/// configs' `paths` resolve.
+/// `bddkit <args> --bddkit-dir <lock>` from the repository root, which the
+/// `--config` and feature path arguments are relative to.
 fn bddkit(bin: &Path, args: &[&str], env: &[(&str, &Path)]) -> Output {
     let mut command = Command::new(bin);
     command
