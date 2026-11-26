@@ -1,6 +1,6 @@
-# Windows only: the shells a suite reaches without Git Bash. Run from the
-# repository root, like examples/exec.yaml.
-paths: [examples/windows]
+# Windows only: the shells a suite reaches without Git Bash. `paths` resolves
+# against this file's folder, like in examples/exec.yaml.
+paths: [windows]
 resources:
   exec:
     cmd: {}            # the default shell on Windows: cmd /S /C "<command>"
