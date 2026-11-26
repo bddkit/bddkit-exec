@@ -16,7 +16,7 @@ The library is written to `target/release/`.
 
 ## Installing
 
-Tested against the `bddkit` host that `ci.yml` pins for the end-to-end job (`HOST_TAG`); the plugin needs a host that speaks plugin ABI 4 (bddkit 0.5.0 or later). `bddkit plugin install exec` installs a release; a suite reaches it through its implicit instance, so it is installed by name, not from a `resources` key. For a build of your own, point a plugin lock file at the built library:
+Tested against the `bddkit` host that `ci.yml` pins for the end-to-end job (`HOST_TAG`); the plugin needs a host that speaks plugin ABI 4 (bddkit 0.5.0 or later). The examples and tests in this repository need bddkit 0.6.0 or newer: their configs write `paths` relative to the config's own folder. `bddkit plugin install exec` installs a release; a suite reaches it through its implicit instance, so it is installed by name, not from a `resources` key. For a build of your own, point a plugin lock file at the built library:
 
 ```yaml
 # .bddkit/plugins.yaml, beside your config
@@ -178,7 +178,7 @@ Under `I am in debug mode` the command line and its exit are traced to stderr; a
 
 ## Running the examples and the tests
 
-`examples/README.md` describes the demo suite. `cargo test --lib --test exports` needs nothing but the platform's own shell; `cargo test --test e2e` also needs a `bddkit` binary (`BDDKIT_BIN`, `PATH`, or a sibling `../bddkit` build) and skips itself, saying why, without one.
+`examples/README.md` describes the demo suite. `cargo test --lib --test exports` needs nothing but the platform's own shell; `cargo test --test e2e` also needs a `bddkit` binary, 0.6.0 or newer (`BDDKIT_BIN`, `PATH`, or a sibling `../bddkit` build), and skips itself, saying why, without one.
 
 ## Not in v1
 
